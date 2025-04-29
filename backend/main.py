@@ -226,5 +226,46 @@ async def perform_research(query: Query):
                     "content": content
                 })
 
-        #
+        # Step 3: Generate summary with OpenAI
+        summary = summarize_content(query.text, enriched_results)
 
+        # Step 4: Format the response
+        response_data = {
+            "query": query.text,
+            "results": [
+                {
+                    "title": result["title"],
+                    "url": result["url"],
+                    "snippet": result["snippet"]
+                } for result in enriched_results
+            ],
+            "summary": summary
+        }
+
+        # Save to database
+        save_research(query.text, response_data)
+
+        return response_data
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+
+@app.get("/history")
+async def get_histroy():
+    return get_research_history()
+
+@app.get("/history/{research_id: int}")
+async def get_research(research_id: int):
+    research = get_research_by_id(research_id)
+    if not research:
+        raise HTTPException(status_code=404, detail="Research not found")
+    return research
+
+@app.get("/")
+async def root():
+    return {"message": "Research Agent API is running!"}
+
+if __name__ == "__main__":
+    init_db()
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
