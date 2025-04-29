@@ -186,3 +186,45 @@ def save_research(query: str, results: dict):
     )
     conn.commit()
     conn.close()
+
+def get_research_history():
+    conn = sqlite3.connect('research_history.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM research_history ORDER BY timestamp DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_research_by_id(research_id: int):
+    conn = sqlite3.connect('research_history.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM research_history WHERE id = ?", (research_id,))
+    row = cursor.fetchall()
+    conn.close()
+    return dict(row) if row else None
+
+@app.post("/research", response_model=ResearchResponse)
+async def perform_research(query: Query):
+    try:
+        # Step 1: Search DuckDuckGo
+        search_results = search_duckduckgo(query.text, query.num_results)
+
+        if not search_results:
+            raise HTTPException(status_code=404, detail="No search results found")
+        
+        # Step 2: Extract content from each result
+        enriched_results = []
+        for result in search_results:
+            content = extract_content(result["url"])
+            if content:
+                enriched_results.append({
+                    "title": result["title"],
+                    "url": result["url"],
+                    "snippet": result["snippet"],
+                    "content": content
+                })
+
+        #
+
