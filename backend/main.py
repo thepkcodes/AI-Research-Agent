@@ -161,3 +161,28 @@ def summarize_content(query: str, contents: List[dict]):
     except Exception as e:
         print(f"Error in OpenAI API call: {e}")
         return "Failed to generate summary due to an error."
+    
+def init_db():
+    conn = sqlite3.connect('research_history.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS research_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        results TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_research(query: str, results: dict):
+    conn = sqlite3.connect('research_history.db')
+    cursor = conn.cursor()
+    timestamp = datetime.now().isoformat()
+    cursor.execute(
+        "INSERT INTO research_history (query, results, timestamp) VALUES (?, ?, ?)",
+        (query, json.dumps(results), timestamp)
+    )
+    conn.commit()
+    conn.close()
