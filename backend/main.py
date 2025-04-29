@@ -145,3 +145,19 @@ def summarize_content(query: str, contents: List[dict]):
     Include the most important points, any consensus among sources, and significant disagreements if they exist.
     Format your response as 5-10 bullet points highlighting the most important information.
     """
+
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a research assistant that creates concise, accurate summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error in OpenAI API call: {e}")
+        return "Failed to generate summary due to an error."
