@@ -61,9 +61,55 @@ export default function Home() {
 
                     <div className="mb-4">
                         <label htmlFor="numResults" className="block mb-2">Number of results:</label>
+                        <input
+                            type="number"
+                            id="numResults"
+                            value={numResults}
+                            onChange={(e) => setNumResults(parseInt(e.target.value))}
+                            className="w-full p-2 border rounded"
+                            min="1"
+                            max="10"
+                        />
                     </div>
+
+                    <button
+                        type="submit"
+                        className="bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600"
+                        disabled={loading}
+                    >
+
+                        {loading ? 'Researching...' : 'Search'}
+                    </button>
                 </from>
+
+                {error && (
+                    <div className="bg-red-100 borded-red-400 text-red-700 px-4 py-3 rounded mb-4">
+                        {error}
+                    </div>
+                )}
+
+                {results && (
+                    <div className="results">
+                        <h2 className="text-2xl font-bold mb-4">Summary</h2>
+                        <div className="bg-gray-100 p-4 rounded mb-6 whitespace-pre-line">
+                            {results.summary}
+                        </div>
+
+                        <h2 className="text-2xl font-bold mb-4">Sources</h2>
+                        <ul className="space-y-4">
+                            {results.results.map((result, index) => (
+                                <li key={index} className="border p-4 rounded">
+                                    <h3 className="font-bold">{result.title}</h3>
+                                    <a href={result.url} className="text-blue-500 hover:underline" target="_blank" rel="noopener noreferrer">
+                                        {result.url}
+                                    </a>
+                                    <p className="mt-2">{result.snippet}</p>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
             </main>
         </div>
-    )
+    );
 }
