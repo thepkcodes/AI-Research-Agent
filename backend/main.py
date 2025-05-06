@@ -267,7 +267,7 @@ async def perform_research(query: Query):
 async def get_history():
     return get_research_history()
 
-@app.get("/history/{research_id: int}")
+@app.get("/history/{research_id}")
 async def get_research(research_id: int):
     research = get_research_by_id(research_id)
     if not research:
