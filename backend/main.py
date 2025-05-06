@@ -20,6 +20,16 @@ openai_api_key = os.environ.get("OPENAI_API_KEY")
 
 app = FastAPI(title="Research Agent API")
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development, "*" is okay. In production, use ["http://localhost:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class Query(BaseModel):
     text: str
     num_results: Optional[int] = 5
@@ -77,7 +87,7 @@ def search_duckduckgo(query: str, num_results: int = 5):
         snippet_element = result.select_one('.result__snippet')
         snippet = snippet_element.get_text().strip() if snippet_element else ""
 
-        result.append({
+        results.append({
             "title": title,
             "url": url,
             "snippet": snippet
@@ -248,11 +258,13 @@ async def perform_research(query: Query):
         return response_data
     
     except Exception as e:
+        print(f"DEBUG ERROR: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
     
 
 @app.get("/history")
-async def get_histroy():
+async def get_history():
     return get_research_history()
 
 @app.get("/history/{research_id: int}")
