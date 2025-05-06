@@ -5,7 +5,7 @@ import uvicorn
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-import openai
+from openai import OpenAI
 import os
 import sqlite3
 import json
@@ -15,20 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Set OpenAI API key
-openai_api_key = os.environ.get("OPENAI_API_KEY")
-
 app = FastAPI(title="Research Agent API")
-
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For development, "*" is okay. In production, use ["http://localhost:3000"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 class Query(BaseModel):
     text: str
@@ -100,77 +87,115 @@ def search_duckduckgo(query: str, num_results: int = 5):
 
 def extract_content(url: str, max_length: int = 8000):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64;) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64;) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language":"en-US,en;q=0.5",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-    except requests.RequestException:
+
+        content_type = response.headers.get('Content_Type', '').lower()
+        if 'text/html' not in content_type:
+            print(f"Skipping non-HTML content: {content_type} for URL: {url}")
+            return ""
+        
+    except requests.RequestException as e:
+        print(f"Request failed for {url}: {str(e)}")
+        return ""
+    try:
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Remove script and style elements
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "advertisement", "noscript", "iframe"]):
+            element.extract()
+
+        main_content = None
+        for container in ["main", "article", ".content", ".post", ".article", ".main-content"]:
+            content = soup.select(container)
+            if content:
+                main_content = content
+                break
+
+        if main_content:
+            text = " ".join([section.get_text(separator=' ', strip=True) for section in main_content])
+        else:
+            paragraphs = soup.find_all('p')
+            if paragraphs:
+                text = " ".join([p.get_text(strip=True) for p in paragraphs])
+            else:
+                text = soup.get_text(separator=' ', strip=True)
+
+        # Clean up whitespace
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
+        text = ' '.join(chunk for chunk in chunks if chunk)
+
+        import re
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # Truncate if necessary
+        if len(text) > max_length:
+            text = text[:max_length] + "..."
+
+        return text
+    
+    except Exception as e:
+        print(f"Error extracting content from {url}: {str(e)}")
         return ""
     
-    soup = BeautifulSoup(response.text, 'html.parser')
-
-    # Remove script and style elements
-    for script in soup(["script", "style", "nav", "footer", "header"]):
-        script.extract()
-
-    # Get text content
-    text = soup.get_text(separator=' ', strip=True)
-
-    # Clean up whitespace
-    lines = (line.strip() for line in text.splitlines())
-    chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
-    text = ' '.join(chunk for chunk in chunks if chunk)
-
-    # Truncate if necessary
-    if len(text) > max_length:
-        text = text[:max_length] + "..."
-
-    return text
-
 def summarize_content(query: str, contents: List[dict]):
     # Create a prompt for the summarization
-    prompt = f"""
-    Query: "{query}"and
+    system_prompt = "You are a research assistant that creates concise, accurate summaries."
+
+    user_prompt = f"""
+    Query: "{query}"
 
     Here are articles related to this query:
-
-    {'-' * 50}
     """
 
-    for i, content in enumerate(contents):
-        prompt += f"""
+    max_articles = min(5, len(contents))
+
+    for i in range(max_articles):
+        content = contents[i]
+        content_excerpt = content['content'][:800] if 'content' in content else ''
+
+        user_prompt += f"""
         Article {i+1}:
         Title: {content['title']}
         URL: {content['url']}
 
-        Content: {content['content'][:1000]}...
+        Content excerpt: {content_excerpt}
 
-        {'-' * 50}
+        ---
         """
 
-    prompt += """
+    user_prompt += """
     Please provide a concise summary of the key findings from these articles related to the query.
     Include the most important points, any consensus among sources, and significant disagreements if they exist.
     Format your response as 5-10 bullet points highlighting the most important information.
     """
 
-
     try:
-        response = openai.ChatCompletion.create(
+        client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        response = cleint.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a research assistant that creates concise, accurate summaries."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             max_tokens=1000,
             temperature=0.3
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"Error in OpenAI API call: {e}")
-        return "Failed to generate summary due to an error."
+        print(f"Error in OpenAI API call: {str(e)}")
+        return f"Failed to generate summary. Error: {str(e)}"
     
 def init_db():
     conn = sqlite3.connect('research_history.db')
@@ -211,23 +236,30 @@ def get_research_by_id(research_id: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM research_history WHERE id = ?", (research_id,))
-    row = cursor.fetchall()
+    row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
 
 @app.post("/research", response_model=ResearchResponse)
 async def perform_research(query: Query):
     try:
+        print(f"Processing research query: {query.text}")
+
         # Step 1: Search DuckDuckGo
         search_results = search_duckduckgo(query.text, query.num_results)
+        print(f"Found {len(search_results)} search results")
 
         if not search_results:
             raise HTTPException(status_code=404, detail="No search results found")
         
         # Step 2: Extract content from each result
         enriched_results = []
-        for result in search_results:
+        for i, result in enumerate(search_results):
+            print(f"Extracting content from result {i+1}: {result['url']}")
             content = extract_content(result["url"])
+            content_length = len(content) if content else 0
+            print(f"Extracted {content_length} characters from {result['url']}")
+
             if content:
                 enriched_results.append({
                     "title": result["title"],
@@ -236,8 +268,18 @@ async def perform_research(query: Query):
                     "content": content
                 })
 
+        if not enriched_results:
+            raise HTTPException(status_code=500, detail="Failed to extract content from any search results")
+
         # Step 3: Generate summary with OpenAI
+        print(f"Generating summary for {len(enriched_results)} enriched results")
         summary = summarize_content(query.text, enriched_results)
+
+        if not summary or summary.startswith("Failed to generate summary"):
+            print(f"Summary generation failed: {summary}")
+            summary = "Failed to generate summary. Please try again otr refine your query."
+        else:
+            print(f"Successfully generated summary of length {len(summary)}")
 
         # Step 4: Format the response
         response_data = {
@@ -253,15 +295,22 @@ async def perform_research(query: Query):
         }
 
         # Save to database
-        save_research(query.text, response_data)
+        try:
+            save_research(query.text, response_data)
+            print("Research saved to database")
+        except Exception as db_error:
+            print(f"Failed to save to database: {str(db_error)}")
 
         return response_data
     
+    except HTTPException as he:
+        print(f"HTTP exception:" {he.detail}")
+        raise he
+
     except Exception as e:
-        print(f"DEBUG ERROR: {e}")
+        print(f"Error in research process: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-    
 
 @app.get("/history")
 async def get_history():
