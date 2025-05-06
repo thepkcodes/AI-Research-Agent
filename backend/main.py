@@ -183,7 +183,7 @@ def summarize_content(query: str, contents: List[dict]):
 
     try:
         client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        response = cleint.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
