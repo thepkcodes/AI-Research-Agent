@@ -304,7 +304,7 @@ async def perform_research(query: Query):
         return response_data
     
     except HTTPException as he:
-        print(f"HTTP exception:" {he.detail}")
+        print(f"HTTP exception: {he.detail}")
         raise he
 
     except Exception as e:
