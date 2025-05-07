@@ -6,19 +6,22 @@ import uvicorn
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-from openai import OpenAI
+import openai
 import os
 import sqlite3
 import json
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load .env
+# Load environment variables
 load_dotenv()
+
+# Configure OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI(title="Research Agent API")
 
-# CORS so Next.js at :3000 can hit us
+# CORS so Next.js (localhost:3000) can call us
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -26,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Models ---
+# --- Pydantic Models ---
 class Query(BaseModel):
     text: str
     num_results: Optional[int] = 5
@@ -41,9 +44,11 @@ class ResearchResponse(BaseModel):
     results: List[SearchResult]
     summary: str
 
-# --- DB Helpers ---
+# --- SQLite Helpers ---
+DB_PATH = "research_history.db"
+
 def init_db():
-    conn = sqlite3.connect("research_history.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS research_history (
@@ -57,7 +62,7 @@ def init_db():
     conn.close()
 
 def save_research(query: str, payload: dict):
-    conn = sqlite3.connect("research_history.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     ts = datetime.now().isoformat()
     cur.execute(
@@ -68,13 +73,12 @@ def save_research(query: str, payload: dict):
     conn.close()
 
 def get_research_history():
-    conn = sqlite3.connect("research_history.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM research_history ORDER BY timestamp DESC")
     rows = cur.fetchall()
     conn.close()
-
     out = []
     for r in rows:
         rec = dict(r)
@@ -83,7 +87,7 @@ def get_research_history():
     return out
 
 def get_research_by_id(rid: int):
-    conn = sqlite3.connect("research_history.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM research_history WHERE id = ?", (rid,))
@@ -95,11 +99,12 @@ def get_research_by_id(rid: int):
     rec["results"] = json.loads(rec["results"])
     return rec
 
+# Initialize DB on startup
 @app.on_event("startup")
 def on_startup():
     init_db()
 
-# --- DuckDuckGo Scraper ---
+# --- DuckDuckGo Search ---
 def search_duckduckgo(query: str, num_results: int = 5):
     q = urllib.parse.quote_plus(query)
     url = f"https://html.duckduckgo.com/html/?q={q}"
@@ -120,29 +125,28 @@ def search_duckduckgo(query: str, num_results: int = 5):
             continue
         title = link.get_text(strip=True)
         raw = link.get("href", "")
-        # handle DuckDuckGo's /l/?uddg=<encoded_url>
         if raw.startswith("/l/"):
             parsed = urllib.parse.urlparse(raw)
             qs = urllib.parse.parse_qs(parsed.query)
-            url = qs.get("uddg", [raw])[0]
+            href = qs.get("uddg", [raw])[0]
         else:
-            url = raw
+            href = raw
         snippet_el = block.select_one(".result__snippet")
         snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-        hits.append({"title": title, "url": url, "snippet": snippet})
+        hits.append({"title": title, "url": href, "snippet": snippet})
         if len(hits) >= num_results:
             break
 
     return hits
 
-# --- Content Extractor (with snippet fallback) ---
+# --- Content Extraction (with fallback) ---
 def extract_content(url: str, max_length: int = 8000):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/html"}
     try:
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
         if "text/html" not in r.headers.get("Content-Type", ""):
-            return ""  # fallback to snippet
+            return ""
     except Exception:
         return ""
 
@@ -166,11 +170,11 @@ def extract_content(url: str, max_length: int = 8000):
     text = " ".join(text.split())
     return text[:max_length] + "..." if len(text) > max_length else text
 
-# --- Summarizer ---
+# --- Summarization via openai.ChatCompletion ---
 def summarize_content(query: str, items: List[dict]):
     system = "You are a research assistant that creates concise, accurate summaries."
     user = f'Query: "{query}"\n\n'
-    for i, it in enumerate(items[:5], 1):
+    for i, it in enumerate(items[:5], start=1):
         excerpt = it["content"][:800]
         user += (
             f"Article {i}:\n"
@@ -181,8 +185,7 @@ def summarize_content(query: str, items: List[dict]):
     user += "Please provide a concise summary in 5–10 bullet points."
 
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        resp = client.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[{"role":"system","content":system}, {"role":"user","content":user}],
             max_tokens=800,
@@ -195,21 +198,17 @@ def summarize_content(query: str, items: List[dict]):
 # --- Routes ---
 @app.post("/research", response_model=ResearchResponse)
 async def perform_research(q: Query):
-    # 1) get raw hits
     raw = search_duckduckgo(q.text, q.num_results)
     if not raw:
-        raise HTTPException(404, detail="No search results found")
+        raise HTTPException(status_code=404, detail="No search results found")
 
-    # 2) build enriched list (content or snippet fallback)
     enriched = []
     for hit in raw:
         content = extract_content(hit["url"]) or hit["snippet"]
         enriched.append({**hit, "content": content})
 
-    # 3) run summary over enriched
     summary = summarize_content(q.text, enriched)
 
-    # 4) assemble payload (use raw for sources so you get the exact count)
     payload = {
         "query": q.text,
         "results": raw,

@@ -7,7 +7,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ message: "Invalid request: text is required" });
     }
   
-    // 10s timeout
+    // 10s timeout via AbortController
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
   
