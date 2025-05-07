@@ -13,15 +13,15 @@ import json
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load env
 load_dotenv()
 
-# Configure OpenAI
+# Configure your API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI(title="Research Agent API")
 
-# CORS so Next.js (localhost:3000) can call us
+# Allow Next.js on localhost:3000 to call us
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -29,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic Models ---
+# — Pydantic models —
 class Query(BaseModel):
     text: str
     num_results: Optional[int] = 5
@@ -44,25 +44,25 @@ class ResearchResponse(BaseModel):
     results: List[SearchResult]
     summary: str
 
-# --- SQLite Helpers ---
-DB_PATH = "research_history.db"
+# — SQLite setup —
+DB = "research_history.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS research_history (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            query     TEXT NOT NULL,
-            results   TEXT NOT NULL,
-            timestamp TEXT NOT NULL
+          id        INTEGER PRIMARY KEY AUTOINCREMENT,
+          query     TEXT NOT NULL,
+          results   TEXT NOT NULL,
+          timestamp TEXT NOT NULL
         )
     """)
     conn.commit()
     conn.close()
 
 def save_research(query: str, payload: dict):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB, check_same_thread=False)
     cur = conn.cursor()
     ts = datetime.now().isoformat()
     cur.execute(
@@ -73,7 +73,7 @@ def save_research(query: str, payload: dict):
     conn.close()
 
 def get_research_history():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM research_history ORDER BY timestamp DESC")
@@ -87,7 +87,7 @@ def get_research_history():
     return out
 
 def get_research_by_id(rid: int):
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM research_history WHERE id = ?", (rid,))
@@ -99,25 +99,23 @@ def get_research_by_id(rid: int):
     rec["results"] = json.loads(rec["results"])
     return rec
 
-# Initialize DB on startup
 @app.on_event("startup")
 def on_startup():
     init_db()
 
-# --- DuckDuckGo Search ---
+# — DuckDuckGo scraping —
 def search_duckduckgo(query: str, num_results: int = 5):
     q = urllib.parse.quote_plus(query)
     url = f"https://html.duckduckgo.com/html/?q={q}"
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
     except Exception as e:
         print("DuckDuckGo error:", e)
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(r.text, "html.parser")
     hits = []
     for block in soup.select(".result"):
         link = block.select_one(".result__title a")
@@ -139,7 +137,7 @@ def search_duckduckgo(query: str, num_results: int = 5):
 
     return hits
 
-# --- Content Extraction (with fallback) ---
+# — Content extraction (with snippet fallback) —
 def extract_content(url: str, max_length: int = 8000):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/html"}
     try:
@@ -170,11 +168,11 @@ def extract_content(url: str, max_length: int = 8000):
     text = " ".join(text.split())
     return text[:max_length] + "..." if len(text) > max_length else text
 
-# --- Summarization via openai.ChatCompletion ---
+# — Summarization (new v1.0.0 interface) —
 def summarize_content(query: str, items: List[dict]):
     system = "You are a research assistant that creates concise, accurate summaries."
     user = f'Query: "{query}"\n\n'
-    for i, it in enumerate(items[:5], start=1):
+    for i, it in enumerate(items[:5], 1):
         excerpt = it["content"][:800]
         user += (
             f"Article {i}:\n"
@@ -185,7 +183,7 @@ def summarize_content(query: str, items: List[dict]):
     user += "Please provide a concise summary in 5–10 bullet points."
 
     try:
-        resp = openai.ChatCompletion.create(
+        resp = openai.chat.completions.create(
             model="gpt-4",
             messages=[{"role":"system","content":system}, {"role":"user","content":user}],
             max_tokens=800,
@@ -193,14 +191,15 @@ def summarize_content(query: str, items: List[dict]):
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
+        # return the real error so you can debug
         return f"Failed to generate summary: {e}"
 
-# --- Routes ---
+# — Endpoints —
 @app.post("/research", response_model=ResearchResponse)
 async def perform_research(q: Query):
     raw = search_duckduckgo(q.text, q.num_results)
     if not raw:
-        raise HTTPException(status_code=404, detail="No search results found")
+        raise HTTPException(404, detail="No search results found")
 
     enriched = []
     for hit in raw:
