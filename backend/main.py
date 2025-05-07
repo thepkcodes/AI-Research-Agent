@@ -6,7 +6,7 @@ import uvicorn
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-import openai
+from google import genai
 import os
 import sqlite3
 import json
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your API key
-openai.api_key = os.getenv("OPENAI_API_KEY")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = FastAPI(title="Research Agent API")
 
@@ -183,11 +183,14 @@ def summarize_content(query: str, items: List[dict]):
     user += "Please provide a concise summary in 5–10 bullet points."
 
     try:
-        resp = openai.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role":"system","content":system}, {"role":"user","content":user}],
-            max_tokens=800,
-            temperature=0.3
+        resp = genai.chat.create(
+            model=os.getenv("GEMINI_MODEL", "models/chat-bison-001"),
+            messages=[
+                {"author":"system","content":system},
+                {"author":"user","content":user}
+            ],
+            temperature=0.3,
+            candidate_count=1,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
