@@ -2,13 +2,12 @@ export default async function handler(req, res) {
     if (req.method !== "POST") {
       return res.status(405).json({ message: "Method not allowed" });
     }
-  
     const { text, num_results } = req.body;
     if (!text || typeof text !== "string") {
       return res.status(400).json({ message: "Invalid request: text is required" });
     }
   
-    // 10s timeout via AbortController
+    // 10s timeout
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
   
@@ -21,8 +20,8 @@ export default async function handler(req, res) {
       });
   
       if (!backend.ok) {
-        const errBody = await backend.json().catch(() => ({}));
-        throw new Error(errBody.detail || errBody.message || `Status ${backend.status}`);
+        const err = await backend.json().catch(() => ({}));
+        throw new Error(err.detail || err.message || `Status ${backend.status}`);
       }
   
       const data = await backend.json();

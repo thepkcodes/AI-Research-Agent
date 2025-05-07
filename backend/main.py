@@ -13,12 +13,12 @@ import json
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load .env
 load_dotenv()
 
 app = FastAPI(title="Research Agent API")
 
-# Allow Next.js at localhost:3000 to talk to us
+# CORS so Next.js at :3000 can hit us
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic models ---
+# --- Models ---
 class Query(BaseModel):
     text: str
     num_results: Optional[int] = 5
@@ -41,7 +41,7 @@ class ResearchResponse(BaseModel):
     results: List[SearchResult]
     summary: str
 
-# --- DB helpers ---
+# --- DB Helpers ---
 def init_db():
     conn = sqlite3.connect("research_history.db", check_same_thread=False)
     cur = conn.cursor()
@@ -74,6 +74,7 @@ def get_research_history():
     cur.execute("SELECT * FROM research_history ORDER BY timestamp DESC")
     rows = cur.fetchall()
     conn.close()
+
     out = []
     for r in rows:
         rec = dict(r)
@@ -94,12 +95,11 @@ def get_research_by_id(rid: int):
     rec["results"] = json.loads(rec["results"])
     return rec
 
-# Ensure DB is ready on startup
 @app.on_event("startup")
 def on_startup():
     init_db()
 
-# --- DuckDuckGo search & parse ---
+# --- DuckDuckGo Scraper ---
 def search_duckduckgo(query: str, num_results: int = 5):
     q = urllib.parse.quote_plus(query)
     url = f"https://html.duckduckgo.com/html/?q={q}"
@@ -109,43 +109,41 @@ def search_duckduckgo(query: str, num_results: int = 5):
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print("DuckDuckGo search error:", e)
+        print("DuckDuckGo error:", e)
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    items = []
+    hits = []
     for block in soup.select(".result"):
-        a = block.select_one(".result__title a")
-        if not a:
+        link = block.select_one(".result__title a")
+        if not link:
             continue
-        title = a.get_text(strip=True)
-        raw_href = a.get("href", "")
-        # DuckDuckGo HTML sometimes uses /l/?uddg=<url>
-        if raw_href.startswith("/l/"):
-            # extract uddg param
-            parsed = urllib.parse.urlparse(raw_href)
+        title = link.get_text(strip=True)
+        raw = link.get("href", "")
+        # handle DuckDuckGo's /l/?uddg=<encoded_url>
+        if raw.startswith("/l/"):
+            parsed = urllib.parse.urlparse(raw)
             qs = urllib.parse.parse_qs(parsed.query)
-            href = qs.get("uddg", [raw_href])[0]
+            url = qs.get("uddg", [raw])[0]
         else:
-            href = raw_href
+            url = raw
         snippet_el = block.select_one(".result__snippet")
         snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-        items.append({"title": title, "url": href, "snippet": snippet})
-        if len(items) >= num_results:
+        hits.append({"title": title, "url": url, "snippet": snippet})
+        if len(hits) >= num_results:
             break
 
-    return items
+    return hits
 
-# --- Content extraction ---
+# --- Content Extractor (with snippet fallback) ---
 def extract_content(url: str, max_length: int = 8000):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/html"}
     try:
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
         if "text/html" not in r.headers.get("Content-Type", ""):
-            return ""
-    except Exception as e:
-        print("Fetch content error for", url, e)
+            return ""  # fallback to snippet
+    except Exception:
         return ""
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -168,19 +166,19 @@ def extract_content(url: str, max_length: int = 8000):
     text = " ".join(text.split())
     return text[:max_length] + "..." if len(text) > max_length else text
 
-# --- Summarization ---
-def summarize_content(query: str, contents: List[dict]):
+# --- Summarizer ---
+def summarize_content(query: str, items: List[dict]):
     system = "You are a research assistant that creates concise, accurate summaries."
     user = f'Query: "{query}"\n\n'
-    for i, c in enumerate(contents[:5], start=1):
-        excerpt = c.get("content", "")[:800]
+    for i, it in enumerate(items[:5], 1):
+        excerpt = it["content"][:800]
         user += (
             f"Article {i}:\n"
-            f"Title: {c['title']}\n"
-            f"URL: {c['url']}\n\n"
+            f"Title: {it['title']}\n"
+            f"URL: {it['url']}\n\n"
             f"Excerpt: {excerpt}\n\n---\n\n"
         )
-    user += "Please provide a concise summary of the key findings in 5–10 bullet points."
+    user += "Please provide a concise summary in 5–10 bullet points."
 
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -192,33 +190,29 @@ def summarize_content(query: str, contents: List[dict]):
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        # bubble the real error back
         return f"Failed to generate summary: {e}"
 
-# --- Endpoints ---
+# --- Routes ---
 @app.post("/research", response_model=ResearchResponse)
 async def perform_research(q: Query):
-    # 1) Search
+    # 1) get raw hits
     raw = search_duckduckgo(q.text, q.num_results)
     if not raw:
-        raise HTTPException(status_code=404, detail="No search results found")
+        raise HTTPException(404, detail="No search results found")
 
-    # 2) Extract & enrich
+    # 2) build enriched list (content or snippet fallback)
     enriched = []
-    for r in raw:
-        content = extract_content(r["url"])
-        if content:
-            enriched.append({**r, "content": content})
-    if not enriched:
-        raise HTTPException(status_code=500, detail="Content extraction failed")
+    for hit in raw:
+        content = extract_content(hit["url"]) or hit["snippet"]
+        enriched.append({**hit, "content": content})
 
-    # 3) Summarize
+    # 3) run summary over enriched
     summary = summarize_content(q.text, enriched)
 
-    # 4) Save & respond
+    # 4) assemble payload (use raw for sources so you get the exact count)
     payload = {
         "query": q.text,
-        "results": [{"title": e["title"], "url": e["url"], "snippet": e["snippet"]} for e in enriched],
+        "results": raw,
         "summary": summary
     }
     save_research(q.text, payload)
