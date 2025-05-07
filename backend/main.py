@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your API key
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-001")
 
 app = FastAPI(title="Research Agent API")
 
@@ -183,16 +184,12 @@ def summarize_content(query: str, items: List[dict]):
     user += "Please provide a concise summary in 5–10 bullet points."
 
     try:
-        resp = genai.chat.create(
-            model=os.getenv("GEMINI_MODEL", "models/chat-bison-001"),
-            messages=[
-                {"author":"system","content":system},
-                {"author":"user","content":user}
-            ],
-            temperature=0.3,
-            candidate_count=1,
+        client = genai.Client(api_key=API_KEY)
+        response = client.models.generate_content(
+            model = MODEL,
+            contents = user,
         )
-        return resp.choices[0].message.content.strip()
+        return response.text.strip()
     except Exception as e:
         # return the real error so you can debug
         return f"Failed to generate summary: {e}"
